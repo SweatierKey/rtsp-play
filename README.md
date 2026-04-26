@@ -4,6 +4,10 @@ Open an RTSP URL in a local viewer. A wrapper that prefers
 [`mpv`](https://mpv.io) and falls back to `ffplay`. All player flags are
 tuned for low-latency live playback.
 
+## Demo
+
+[![asciicast](https://asciinema.org/a/9TbiVLGqXQcm3dz0.svg)](https://asciinema.org/a/9TbiVLGqXQcm3dz0)
+
 ## Install
 
     chmod +x rtsp-play
