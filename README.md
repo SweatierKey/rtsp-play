@@ -6,7 +6,9 @@ tuned for low-latency live playback.
 
 ## Demo
 
-[![asciicast](https://asciinema.org/a/9TbiVLGqXQcm3dz0.svg)](https://asciinema.org/a/9TbiVLGqXQcm3dz0)
+![demo](demo.gif)
+
+Watch with pause/seek on [asciinema.org](https://asciinema.org/a/9TbiVLGqXQcm3dz0).
 
 ## Install
 
