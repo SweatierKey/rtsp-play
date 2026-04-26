@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""rtsp-play: open an RTSP URL in a local viewer (mpv preferred, ffplay fallback).
+
+Reads an RTSP URL from argv or from the first non-empty stdin line, picks a
+player (mpv preferred, ffplay if not), and execs it with low-latency settings.
+This script writes nothing on stdout — it is not part of the data pipeline.
+"""
+
+import argparse
+import shutil
+import signal
+import subprocess
+import sys
+from typing import List, Optional
+from urllib.parse import urlparse
+
+VERSION = "1.0.0"
+PROG = "rtsp-play"
+
+EXIT_OK = 0
+EXIT_USAGE = 1
+EXIT_INTERRUPT = 130
+
+PLAYERS = ("mpv", "ffplay")
+TRANSPORTS = ("tcp", "udp")
+
+
+class _Err(Exception):
+    def __init__(self, code: int, msg: str):
+        super().__init__(msg)
+        self.code = code
+        self.msg = msg
+
+
+def log(verbose: bool, msg: str) -> None:
+    if verbose:
+        print(f"{PROG}: {msg}", file=sys.stderr)
+
+
+def err(msg: str) -> None:
+    print(f"{PROG}: {msg}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Player selection
+# ---------------------------------------------------------------------------
+
+def select_player(preference: str) -> str:
+    """Return the player name to use ('mpv' or 'ffplay').
+
+    preference is one of 'auto', 'mpv', 'ffplay'. Raises _Err if the requested
+    player (or, in 'auto' mode, any player) is not in PATH.
+    """
+    if preference == "auto":
+        for cand in PLAYERS:
+            if shutil.which(cand):
+                return cand
+        raise _Err(EXIT_USAGE,
+                   "neither mpv nor ffplay found in PATH "
+                   "(install one: 'apt install mpv' or 'apt install ffmpeg')")
+    if preference in PLAYERS:
+        if not shutil.which(preference):
+            hint = "apt install mpv" if preference == "mpv" else "apt install ffmpeg"
+            raise _Err(EXIT_USAGE, f"{preference} not found in PATH (install with: {hint})")
+        return preference
+    raise _Err(EXIT_USAGE, f"unknown player: {preference}")
+
+
+# ---------------------------------------------------------------------------
+# Argv builders (pure functions — kept testable without a display)
+# ---------------------------------------------------------------------------
+
+def build_mpv_argv(url: str, transport: str, no_audio: bool, verbose: bool) -> List[str]:
+    # The --profile=low-latency umbrella sets cache=no, vd-lavc-threads=1,
+    # demuxer-lavf-o-add=fflags=+nobuffer, video-latency-hacks=yes, etc.
+    # We use --demuxer-lavf-o-*add* (not assignment) to layer transport on top
+    # without clobbering the profile's defaults.
+    argv = [
+        "mpv",
+        "--profile=low-latency",
+        f"--demuxer-lavf-o-add=rtsp_transport={transport}",
+        "--demuxer-lavf-o-add=fflags=+discardcorrupt",
+        "--demuxer-lavf-probesize=32",
+        "--demuxer-lavf-analyzeduration=0",
+        "--cache=no",
+        "--framedrop=decoder+vo",
+    ]
+    if no_audio:
+        argv.append("--no-audio")
+    if not verbose:
+        argv.append("--really-quiet")
+    argv.append("--")
+    argv.append(url)
+    return argv
+
+
+def build_ffplay_argv(url: str, transport: str, no_audio: bool, verbose: bool) -> List[str]:
+    argv = [
+        "ffplay",
+        "-rtsp_transport", transport,
+        "-fflags", "nobuffer+discardcorrupt",
+        "-flags", "low_delay",
+        "-probesize", "32",
+        "-analyzeduration", "0",
+        "-framedrop",
+    ]
+    if no_audio:
+        argv.append("-an")
+    if not verbose:
+        argv += ["-loglevel", "quiet"]
+    argv.append(url)
+    return argv
+
+
+def build_argv(player: str, url: str, transport: str, no_audio: bool, verbose: bool):
+    if player == "mpv":
+        return build_mpv_argv(url, transport, no_audio, verbose)
+    if player == "ffplay":
+        return build_ffplay_argv(url, transport, no_audio, verbose)
+    raise _Err(EXIT_USAGE, f"unknown player: {player}")
+
+
+# ---------------------------------------------------------------------------
+# CLI plumbing
+# ---------------------------------------------------------------------------
+
+def _read_url_from_stdin() -> Optional[str]:
+    for line in sys.stdin:
+        line = line.strip()
+        if line:
+            return line
+    return None
+
+
+def _validate_url(url: str) -> None:
+    p = urlparse(url)
+    if p.scheme not in ("rtsp", "rtsps") or not p.netloc:
+        raise _Err(EXIT_USAGE, f"not an RTSP URL: {url}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog=PROG,
+        description="Open an RTSP URL in mpv (preferred) or ffplay.",
+        epilog="If RTSP_URL is omitted, one URL is read from stdin (first non-empty line).",
+        add_help=False,
+    )
+    p.add_argument("rtsp_url", nargs="?", metavar="RTSP_URL")
+    p.add_argument("--player", choices=("auto",) + PLAYERS, default="auto",
+                   help="which player to use (default: auto = mpv if available, else ffplay)")
+    p.add_argument("--transport", choices=TRANSPORTS, default="tcp",
+                   help="RTSP transport (default: tcp)")
+    p.add_argument("--no-audio", action="store_true",
+                   help="disable audio playback")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="let the player log on stderr (default: silent)")
+    p.add_argument("-V", "--version", action="store_true",
+                   help="print version and exit")
+    p.add_argument("-h", "--help", action="store_true",
+                   help="show this help and exit")
+    return p
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.help:
+        parser.print_help()
+        return EXIT_OK
+    if args.version:
+        print(f"{PROG} {VERSION}")
+        return EXIT_OK
+
+    try:
+        url = args.rtsp_url
+        if url is None:
+            if sys.stdin.isatty():
+                raise _Err(EXIT_USAGE, "no RTSP URL given and stdin is a terminal")
+            url = _read_url_from_stdin()
+            if url is None:
+                raise _Err(EXIT_USAGE, "no RTSP URL on stdin")
+        _validate_url(url)
+
+        player = select_player(args.player)
+        log(args.verbose, f"using player: {player}")
+        cmd = build_argv(player, url, args.transport, args.no_audio, args.verbose)
+        log(args.verbose, "exec: " + " ".join(cmd))
+
+        stderr_dest = None if args.verbose else subprocess.DEVNULL
+        try:
+            cp = subprocess.run(cmd, stderr=stderr_dest)
+        except KeyboardInterrupt:
+            err("interrupted")
+            return EXIT_INTERRUPT
+        except FileNotFoundError:
+            # Race: player disappeared between which() and exec.
+            raise _Err(EXIT_USAGE, f"{player}: command not found")
+        return cp.returncode
+
+    except _Err as e:
+        err(e.msg)
+        return e.code
+    except KeyboardInterrupt:
+        err("interrupted")
+        return EXIT_INTERRUPT
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        err("interrupted")
+        sys.exit(EXIT_INTERRUPT)
