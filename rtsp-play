@@ -14,7 +14,7 @@ import sys
 from typing import List, Optional
 from urllib.parse import urlparse
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 PROG = "rtsp-play"
 
 EXIT_OK = 0
@@ -108,7 +108,11 @@ def build_ffplay_argv(url: str, transport: str, no_audio: bool, verbose: bool) -
         argv.append("-an")
     if not verbose:
         argv += ["-loglevel", "quiet"]
-    argv.append(url)
+    # `-i URL` (with -i) is the documented way to pass the input. It also
+    # protects against the URL accidentally starting with `-` (which a bare
+    # positional would interpret as another flag — unlikely with rtsp:// but
+    # cheap insurance).
+    argv += ["-i", url]
     return argv
 
 

@@ -83,6 +83,10 @@ class BuildFfplayArgvTests(unittest.TestCase):
         self.assertIn("-framedrop", argv)
         self.assertIn("-loglevel", argv)
         self.assertIn("quiet", argv)
+        # URL must be passed via `-i URL` (last two args), not as a bare
+        # positional — the latter would let a URL starting with `-` be
+        # parsed as a flag.
+        self.assertEqual(argv[-2], "-i")
         self.assertEqual(argv[-1], "rtsp://x/y")
 
     def test_no_audio_and_udp(self):
